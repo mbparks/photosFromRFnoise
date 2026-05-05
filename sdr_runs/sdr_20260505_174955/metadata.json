@@ -1,0 +1,22 @@
+{
+  "timestamp": "2026-05-05T17:50:00",
+  "mode": "spectrogram",
+  "center_freq_hz": 248748000.0,
+  "center_freq_mhz": 248.748,
+  "sample_rate_hz": 2048000.0,
+  "duration_s": 2.0,
+  "gain": "auto",
+  "ppm": 0,
+  "cmap": "viridis",
+  "size_px": 1024,
+  "nfft": 1024,
+  "filters_applied": [
+    "wave_distort",
+    "solarize",
+    "pixelate"
+  ],
+  "filter_seed": null,
+  "freq_seed": null,
+  "image_file": "spectrogram_248.748MHz.png",
+  "csv_written": false
+}

@@ -1,0 +1,22 @@
+{
+  "timestamp": "2026-05-05T17:54:17",
+  "mode": "polar",
+  "center_freq_hz": 507239000.0,
+  "center_freq_mhz": 507.239,
+  "sample_rate_hz": 2048000.0,
+  "duration_s": 2.0,
+  "gain": "auto",
+  "ppm": 0,
+  "cmap": "twilight",
+  "size_px": 1024,
+  "nfft": 1024,
+  "filters_applied": [
+    "gaussian_blur",
+    "wave_distort",
+    "hue_rotate"
+  ],
+  "filter_seed": null,
+  "freq_seed": null,
+  "image_file": "polar_507.239MHz.png",
+  "csv_written": false
+}
