@@ -1,4 +1,6 @@
-# sdr_snapshot
+# Making Art from RF Noise
+
+<img width="1024" height="1024" alt="polar_715 419MHz" src="https://github.com/user-attachments/assets/a66e09fb-6d84-4915-be49-d13c4cddc643" />
 
 Tune an RTL-SDR dongle to a (random) frequency, capture IQ samples, and render the result as a borderless PNG art piece. Three visualization modes, sixteen funk-cranking filters, and a clean per-run output folder.
 
@@ -312,4 +314,4 @@ All three produce a 2D float array. That array gets normalized between robust pe
 
 ## License
 
-Do whatever you want with it.
+GPL-3.0 license
