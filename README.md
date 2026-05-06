@@ -1,4 +1,4 @@
-# Making Art from RF Noise
+# sdr_snapshot
 
 Tune an RTL-SDR dongle to a (random) frequency, capture IQ samples, and render the result as a borderless PNG art piece. Three visualization modes, sixteen funk-cranking filters, and a clean per-run output folder.
 
@@ -79,6 +79,31 @@ python3 sdr_snapshot.py
 ```
 
 Tunes to a random frequency, captures 2 seconds, renders a spectrogram, applies 3 random filters, drops everything in `./sdr_runs/sdr_<timestamp>/`.
+
+---
+
+## Daily use
+
+Virtual environments don't persist across terminal sessions, so every new shell needs the venv reactivated before running the script:
+
+```bash
+source ~/sdr-env/bin/activate
+python3 sdr_snapshot.py
+```
+
+The prompt changes to `(sdr-env) ...` once it's active. Forgetting this step is the most common cause of "it worked yesterday, now it's broken" errors — see [Troubleshooting](#troubleshooting).
+
+To make this less repetitive, add one of these to `~/.zshrc`:
+
+```bash
+# Option A — short alias to activate
+alias sdr='source ~/sdr-env/bin/activate'
+
+# Option B — one-shot wrapper that doesn't need activation at all
+alias sdrshot='~/sdr-env/bin/python3 ~/path/to/sdr_snapshot.py'
+```
+
+With option B, `sdrshot --mode polar --cmap twilight` works from any directory in any terminal, no activation step required. That's the one I'd recommend.
 
 ---
 
@@ -217,7 +242,17 @@ Empty noise looks fine too — it just renders as a Gaussian blob in constellati
 
 ## Troubleshooting
 
-The four problems most likely to hit you, in roughly the order people hit them on a fresh modern macOS install:
+The five problems most likely to hit you, in roughly the order people hit them:
+
+### "It worked before — now it doesn't" after closing and reopening Terminal
+
+Almost always: **the venv isn't active**. Your prompt should start with `(sdr-env)`. If it doesn't:
+
+```bash
+source ~/sdr-env/bin/activate
+```
+
+Without the venv active, `python3` resolves to the system framework Python, which doesn't have the pinned `setuptools<82` and `pyrtlsdr<0.3` — so you'll see weird import errors (`No module named 'pkg_resources'` is the most common). See [Daily use](#daily-use) for aliases that make this a one-time concern.
 
 ### `Error loading librtlsdr. Make sure librtlsdr ... are in your path`
 
@@ -242,11 +277,14 @@ python3 -m pip install 'pyrtlsdr<0.3'
 
 ### `ModuleNotFoundError: No module named 'pkg_resources'`
 
-`setuptools` 82 (released February 2026) finally removed `pkg_resources` after years of deprecation. `pyrtlsdr<0.3` still uses it for version metadata.
+Two possible causes — check them in this order:
 
-```bash
-python3 -m pip install 'setuptools<82'
-```
+1. **Venv not active** — see the very first troubleshooting entry above. This is by far the most common cause on return visits.
+2. **Setuptools 82+ in the venv** — `setuptools` 82 (released February 2026) finally removed `pkg_resources` after years of deprecation, and `pyrtlsdr<0.3` still uses it. Pin it down:
+
+   ```bash
+   python3 -m pip install 'setuptools<82'
+   ```
 
 ### `pyrtlsdr is not installed` despite `pip` saying it is
 
