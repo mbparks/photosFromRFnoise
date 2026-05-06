@@ -314,4 +314,4 @@ All three produce a 2D float array. That array gets normalized between robust pe
 
 ## License
 
-Do whatever you want with it.
+GPL-3.0 license
