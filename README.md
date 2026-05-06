@@ -1,4 +1,4 @@
-# sdr_snapshot
+# Art from RF Noise
 
 Tune an RTL-SDR dongle to a (random) frequency, capture IQ samples, and render the result as a borderless PNG art piece. Three visualization modes, sixteen funk-cranking filters, and a clean per-run output folder.
 
