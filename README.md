@@ -1,6 +1,4 @@
-# Making Art from RF Noise
-
-<img width="1024" height="1024" alt="polar_715 419MHz" src="https://github.com/user-attachments/assets/a66e09fb-6d84-4915-be49-d13c4cddc643" />
+# sdr_snapshot
 
 Tune an RTL-SDR dongle to a (random) frequency, capture IQ samples, and render the result as a borderless PNG art piece. Three visualization modes, sixteen funk-cranking filters, and a clean per-run output folder.
 
@@ -17,9 +15,11 @@ Each run:
 3. Captures IQ samples for a configurable duration.
 4. Renders those samples in one of three modes — `spectrogram`, `constellation`, or `polar`.
 5. Optionally chains a random subset of 16 filters over the image (or a chain you specify).
-6. Drops the PNG, an optional CSV of the raw IQ, and a `metadata.json` into a date-time-stamped folder.
+6. Drops the PNG, plus any of several optional companion exports (CSV, IQ WAV, demodulated audio WAV, signal-features JSON), and a `metadata.json` into a date-time-stamped folder.
 
 The output PNGs have **no axes, no labels, no colorbars, no titles, no borders** — the image fills the entire frame.
+
+The companion exports are designed to feed cleanly into generative AI workflows: the WAV files can be played, analyzed, or sent to multimodal models; the features JSON contains a plain-English summary you can paste straight into a text-to-image prompt.
 
 ---
 
@@ -152,6 +152,8 @@ Sixteen post-processing filters can be applied in random order over the rendered
 
 ## CLI reference
 
+The same reference is available at the terminal — `sdr_snapshot.py --help` (or `-h`) prints all flags grouped by section, plus a usage examples block. The table below is the canonical version.
+
 | Flag                    | Default                  | Description                                                  |
 |-------------------------|--------------------------|--------------------------------------------------------------|
 | `-d, --duration`        | `2.0`                    | Capture duration (seconds)                                   |
@@ -172,6 +174,11 @@ Sixteen post-processing filters can be applied in random order over the rendered
 | `--output-dir`          | `./sdr_runs`             | Parent directory for run folders                             |
 | `--csv`                 | off                      | Also write IQ samples to `iq.csv`                            |
 | `--csv-decimate`        | `1`                      | Keep every Nth IQ sample in the CSV                          |
+| `--wav`                 | off                      | Write decimated IQ as stereo `iq.wav` (I=L, Q=R)             |
+| `--wav-rate`            | `48000`                  | Target sample rate for WAV exports (Hz)                      |
+| `--demod`               | `none`                   | Demodulate and write `audio_demod_<mode>.wav` — `fm`, `am`, or `none` |
+| `--features`            | off                      | Write `features.json` with extracted signal characteristics  |
+| `--export-all`          | off                      | Shorthand for `--csv --wav --demod fm --features`            |
 | `--seed`                | (random)                 | RNG seed for random frequency selection                      |
 | `-v, --verbose`         | off                      | Debug logging                                                |
 
@@ -182,14 +189,90 @@ Sixteen post-processing filters can be applied in random order over the rendered
 ```
 ./sdr_runs/
 └── sdr_20260505_143022/
-    ├── spectrogram_446.123MHz.png   ← the art
-    ├── iq.csv                       ← raw IQ, only if --csv
-    └── metadata.json                ← every parameter + filter chain
+    ├── spectrogram_446.123MHz.png   ← the art (always)
+    ├── metadata.json                ← every parameter + filter chain (always)
+    ├── iq.csv                       ← raw IQ rows, only with --csv
+    ├── iq.wav                       ← stereo IQ as audio, only with --wav
+    ├── audio_demod_fm.wav           ← demodulated mono audio, only with --demod
+    └── features.json                ← extracted signal stats, only with --features
 ```
 
-`metadata.json` records the frequency, sample rate, mode, colormap, filter chain, and seeds — so when one of the random outputs is great you can reproduce or tweak it precisely.
+`metadata.json` records the frequency, sample rate, mode, colormap, filter chain, and seeds — so when one of the random outputs is great you can reproduce or tweak it precisely. It also lists which companion exports were written this run.
 
-The CSV columns are `sample_index, time_s, i, q, magnitude, phase`. A 2-second capture at 2.048 Msps without decimation is roughly 200 MB; `--csv-decimate 100` brings that to ~2 MB.
+### File details
+
+**`iq.csv`** — columns are `sample_index, time_s, i, q, magnitude, phase`. A 2-second capture at 2.048 Msps without decimation is roughly 200 MB; `--csv-decimate 100` brings that to ~2 MB.
+
+**`iq.wav`** — stereo 16-bit PCM. Left channel = I, right channel = Q. Decimated to roughly `--wav-rate` Hz (48 kHz default) using a windowed-sinc FIR low-pass filter. Speaks the same de-facto IQ-WAV dialect as SDR# and GQRX, so you can open these in those tools as well.
+
+**`audio_demod_<mode>.wav`** — mono 16-bit PCM at the same target rate. `fm` uses quadrature FM demodulation (instantaneous frequency); `am` uses envelope demodulation. Quality is good enough to identify what's on the air, not so good that it'll replace SDR# for actual listening.
+
+**`features.json`** — extracted signal characteristics. Structure:
+
+```json
+{
+  "center_freq_mhz": 446.123,
+  "amplitude": { "rms": ..., "crest_factor_db": ..., "envelope_burstiness": ... },
+  "spectrum": {
+    "noise_floor_db": ...,
+    "peak_to_noise_db": ...,
+    "occupied_bandwidth_99pct_khz": ...,
+    "spectral_entropy_normalized": ...,
+    "dominant_peaks_offset_khz": [...]
+  },
+  "phase": { "instantaneous_freq_mean_khz": ..., "instantaneous_freq_std_khz": ... },
+  "summary": "moderate narrowband signal at 446.123 MHz with bursty envelope and 2 dominant carriers"
+}
+```
+
+The `summary` field is intentionally written as a complete English sentence, ready to drop into a generative AI prompt.
+
+---
+
+## Generative AI workflows
+
+The companion exports are designed to feed cleanly into AI image and audio tools. A few concrete recipes:
+
+### 1. ControlNet conditioning from the PNG
+
+The borderless image output makes excellent structural input for image-to-image generation. In ComfyUI or Automatic1111:
+
+1. Generate a constellation or polar PNG with `python3 sdr_snapshot.py --mode polar --filters 0`. Skip filters to keep the structure clean for ControlNet.
+2. Load it as a ControlNet input (depth, canny, or scribble work well).
+3. Prompt something like *"intricate biomechanical mandala, brass and obsidian, cinematic lighting, ultra-detailed"*.
+4. The radio data dictates the geometry, the model fills in the texture and surface.
+
+This is the highest-impact AI integration available without writing any code. Filters can come back in for the final piece, but the unfiltered image is what you want for the conditioning step.
+
+### 2. Auto-prompted text-to-image from `features.json`
+
+```python
+import json, requests
+
+feats = json.load(open("sdr_runs/sdr_<timestamp>/features.json"))
+prompt = (
+    f"abstract digital art depicting {feats['summary']}, "
+    f"vivid electromagnetic colors, intricate fractal patterns, "
+    f"ethereal and otherworldly mood, ultra-detailed"
+)
+# Send `prompt` to your image API of choice (OpenAI, Replicate, etc.)
+```
+
+The summary string is grammatically a complete signal description, so the AI ends up generating something that's at least loosely faithful to what was actually in the airwaves.
+
+### 3. Multimodal models with the WAV files
+
+Gemini, GPT-4o, and other audio-capable models can ingest `iq.wav` or `audio_demod_fm.wav` directly. Useful prompts:
+
+- *"Describe this audio in vivid sensory metaphors I could use as a text-to-image prompt."*
+- *"Imagine this as a soundtrack to an alien landscape. Describe the landscape."*
+- *"What musical genre or era does this remind you of? Describe a record cover for it."*
+
+Then take the AI's response and feed it to an image model. Two-hop AI workflows like this often produce more interesting results than a single hop.
+
+### 4. Music-from-radio sonification
+
+`audio_demod_fm.wav` is a real audio file and can be loaded into any DAW (Logic, Ableton, Reaper) as a found-sound sample. Sliced, pitched, and processed, captures of structured signals (FM broadcast, ADS-B bursts, weather satellite tones) make distinctive percussion and texture material.
 
 ---
 
@@ -208,15 +291,18 @@ done
 # 4K print
 python3 sdr_snapshot.py --size 4096 --filters 5 --cmap inferno
 
-# Lock to FM broadcast band, capture longer, write CSV
+# Lock to FM broadcast band, capture longer, full AI bundle
 python3 sdr_snapshot.py -d 5 --freq-min 88e6 --freq-max 108e6 \
-  -g 40 --csv --csv-decimate 50
+  -g 40 --export-all
 
 # Apply a specific filter chain in a specific order
 python3 sdr_snapshot.py --filter-list bloom,chromatic_shift,kaleidoscope,vignette
 
 # Reproduce an exact prior result
 python3 sdr_snapshot.py --seed 7 --filter-seed 13 --mode polar --cmap twilight
+
+# Just the AI-friendly bits — no filters, no CSV, clean image for ControlNet
+python3 sdr_snapshot.py --filters 0 --wav --demod fm --features
 ```
 
 ### Colormaps that work especially well
@@ -314,4 +400,4 @@ All three produce a 2D float array. That array gets normalized between robust pe
 
 ## License
 
-GPL-3.0 license
+Do whatever you want with it.

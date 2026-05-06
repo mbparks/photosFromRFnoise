@@ -29,12 +29,20 @@ Examples:
 
     # Apply specific filters in a specific order
     python sdr_snapshot.py --filter-list bloom,chromatic_shift,kaleidoscope,vignette
+
+    # Full export bundle for AI workflows: image + IQ WAV + FM-demod audio +
+    # features.json + iq.csv
+    python sdr_snapshot.py --export-all
+
+    # Just the AI-friendly bits (no CSV)
+    python sdr_snapshot.py --wav --demod fm --features
 """
 
 import argparse
 import json
 import logging
 import sys
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -75,59 +83,111 @@ DEFAULT_SIZE = 1024
 # =========================================================================== #
 
 def parse_args():
+    epilog = """\
+examples:
+  # Default: random freq, 2s capture, spectrogram, 3 random filters
+  sdr_snapshot.py
+
+  # Polar mode with cyclic colormap and lots of filters
+  sdr_snapshot.py --mode polar --cmap twilight --filters 6
+
+  # Lock to FM broadcast band
+  sdr_snapshot.py --freq-min 88e6 --freq-max 108e6 -g 40
+
+  # Reproduce an exact prior result
+  sdr_snapshot.py --seed 7 --filter-seed 13 --mode polar --cmap twilight
+
+  # Specific filter chain in order
+  sdr_snapshot.py --filter-list bloom,chromatic_shift,kaleidoscope,vignette
+
+  # Full export bundle for AI workflows: image + IQ WAV + demod audio +
+  # features.json + iq.csv
+  sdr_snapshot.py --export-all
+
+  # Just the AI-friendly bits, no filters (clean image for ControlNet)
+  sdr_snapshot.py --filters 0 --wav --demod fm --features
+
+  # List all available filters and exit
+  sdr_snapshot.py --list-filters
+
+See README.md for the full reference, troubleshooting, and AI workflow recipes.
+"""
     p = argparse.ArgumentParser(
         description="Capture RF from an RTL-SDR and render it as borderless art.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=epilog,
     )
-    # Capture
-    p.add_argument("-d", "--duration", type=float, default=2.0,
-                   help="Capture duration in seconds.")
-    p.add_argument("-s", "--sample-rate", type=float, default=DEFAULT_SAMPLE_RATE,
-                   help="Sample rate in Hz.")
-    p.add_argument("-f", "--freq", type=float, default=None,
-                   help="Center frequency in Hz. If omitted, picked at random.")
-    p.add_argument("--freq-min", type=float, default=DEFAULT_FREQ_MIN_HZ,
-                   help="Lower bound for random frequency selection (Hz).")
-    p.add_argument("--freq-max", type=float, default=DEFAULT_FREQ_MAX_HZ,
-                   help="Upper bound for random frequency selection (Hz).")
-    p.add_argument("-g", "--gain", default="auto",
-                   help="Tuner gain in dB, or 'auto'.")
-    p.add_argument("--ppm", type=int, default=0,
-                   help="Frequency correction in parts per million.")
-    # Rendering
-    p.add_argument("-m", "--mode", default="spectrogram",
-                   choices=("spectrogram", "constellation", "polar"),
-                   help="Visualization style.")
-    p.add_argument("--cmap", default="viridis",
-                   help="Matplotlib colormap (viridis, magma, inferno, twilight, "
-                        "turbo, plasma, cividis, hsv, ...).")
-    p.add_argument("--size", type=int, default=DEFAULT_SIZE,
-                   help="Output image size in pixels (square).")
-    p.add_argument("--nfft", type=int, default=1024,
-                   help="FFT size for spectrogram mode.")
-    # Filters
-    p.add_argument("--filters", type=int, default=3,
-                   help="Number of random filters to apply (0 = none).")
-    p.add_argument("--filter-list", default=None,
-                   help="Comma-separated explicit filter names "
-                        "(e.g. 'bloom,chromatic_shift,kaleidoscope'). "
-                        "Overrides --filters when provided.")
-    p.add_argument("--filter-seed", type=int, default=None,
-                   help="Seed for filter selection / parameters.")
-    p.add_argument("--list-filters", action="store_true",
-                   help="Print the available filter names and exit.")
-    # Output
-    p.add_argument("--output-dir", type=Path, default=Path("./sdr_runs"),
-                   help="Parent directory; each run creates a timestamped subfolder.")
-    p.add_argument("--csv", action="store_true",
-                   help="Also write IQ samples as iq.csv in the run folder.")
-    p.add_argument("--csv-decimate", type=int, default=1,
-                   help="Keep every Nth IQ sample in the CSV.")
-    # Misc
-    p.add_argument("--seed", type=int, default=None,
-                   help="Seed for random frequency selection.")
-    p.add_argument("-v", "--verbose", action="store_true",
-                   help="Enable debug logging.")
+
+    capture = p.add_argument_group("capture", "How the radio captures samples")
+    capture.add_argument("-d", "--duration", type=float, default=2.0, metavar="SEC",
+                         help="Capture duration in seconds (default: 2.0)")
+    capture.add_argument("-s", "--sample-rate", type=float, default=DEFAULT_SAMPLE_RATE,
+                         metavar="HZ",
+                         help="Sample rate in Hz (default: 2.048e6)")
+    capture.add_argument("-f", "--freq", type=float, default=None, metavar="HZ",
+                         help="Center frequency in Hz. If omitted, picked at random.")
+    capture.add_argument("--freq-min", type=float, default=DEFAULT_FREQ_MIN_HZ,
+                         metavar="HZ",
+                         help="Lower bound for random freq selection (default: 24e6)")
+    capture.add_argument("--freq-max", type=float, default=DEFAULT_FREQ_MAX_HZ,
+                         metavar="HZ",
+                         help="Upper bound for random freq selection (default: 1.7e9)")
+    capture.add_argument("-g", "--gain", default="auto", metavar="DB",
+                         help="Tuner gain in dB, or 'auto' for AGC (default: auto)")
+    capture.add_argument("--ppm", type=int, default=0,
+                         help="Frequency correction in parts per million (default: 0)")
+
+    render = p.add_argument_group("rendering", "How the image is generated")
+    render.add_argument("-m", "--mode", default="spectrogram",
+                        choices=("spectrogram", "constellation", "polar"),
+                        help="Visualization style (default: spectrogram)")
+    render.add_argument("--cmap", default="viridis", metavar="NAME",
+                        help="Matplotlib colormap: viridis, magma, inferno, twilight, "
+                             "turbo, plasma, cividis, hsv, ... (default: viridis)")
+    render.add_argument("--size", type=int, default=DEFAULT_SIZE, metavar="PX",
+                        help="Output image size in pixels, square (default: 1024)")
+    render.add_argument("--nfft", type=int, default=1024,
+                        help="FFT size for spectrogram mode (default: 1024)")
+
+    filters = p.add_argument_group("filters", "Post-processing applied to the image")
+    filters.add_argument("--filters", type=int, default=3, metavar="N",
+                         help="Number of random filters to apply, 0 disables (default: 3)")
+    filters.add_argument("--filter-list", default=None, metavar="NAMES",
+                         help="Comma-separated explicit filter names. "
+                              "Overrides --filters when provided.")
+    filters.add_argument("--filter-seed", type=int, default=None, metavar="N",
+                         help="Seed for filter selection and parameters")
+    filters.add_argument("--list-filters", action="store_true",
+                         help="Print available filter names and exit")
+
+    output = p.add_argument_group("output", "Where files go and what gets written")
+    output.add_argument("--output-dir", type=Path, default=Path("./sdr_runs"),
+                        metavar="DIR",
+                        help="Parent dir; each run gets a timestamped subfolder "
+                             "(default: ./sdr_runs)")
+    output.add_argument("--csv", action="store_true",
+                        help="Write IQ samples to iq.csv")
+    output.add_argument("--csv-decimate", type=int, default=1, metavar="N",
+                        help="Keep every Nth IQ sample in the CSV (default: 1)")
+    output.add_argument("--wav", action="store_true",
+                        help="Write decimated IQ as stereo iq.wav (I=L, Q=R)")
+    output.add_argument("--wav-rate", type=int, default=48000, metavar="HZ",
+                        help="Target sample rate for WAV exports (default: 48000)")
+    output.add_argument("--demod", default="none", choices=("none", "fm", "am"),
+                        help="Demodulate IQ and write audio_demod_<mode>.wav "
+                             "(default: none)")
+    output.add_argument("--features", action="store_true",
+                        help="Write features.json with signal characteristics "
+                             "(useful for AI prompts)")
+    output.add_argument("--export-all", action="store_true",
+                        help="Shorthand for --csv --wav --demod fm --features")
+
+    misc = p.add_argument_group("misc")
+    misc.add_argument("--seed", type=int, default=None, metavar="N",
+                      help="Seed for random frequency selection")
+    misc.add_argument("-v", "--verbose", action="store_true",
+                      help="Enable debug logging")
+
     return p.parse_args()
 
 
@@ -491,6 +551,234 @@ def apply_filter_chain(img: np.ndarray, names: list, rng) -> np.ndarray:
 # CSV / metadata / folder
 # =========================================================================== #
 
+def lowpass_decimate(data: np.ndarray, factor: int, num_taps: int = 64) -> np.ndarray:
+    """Anti-alias FIR filter then decimate. Works for real or complex input."""
+    if factor <= 1:
+        return data
+    cutoff = 0.5 / factor
+    taps = np.sinc(2 * cutoff * (np.arange(num_taps) - (num_taps - 1) / 2.0))
+    taps *= np.hamming(num_taps)
+    taps /= np.sum(taps)
+
+    if np.iscomplexobj(data):
+        re = np.convolve(data.real, taps, mode="same")
+        im = np.convolve(data.imag, taps, mode="same")
+        filtered = re + 1j * im
+    else:
+        filtered = np.convolve(data, taps, mode="same")
+    return filtered[::factor]
+
+
+def _to_int16(samples: np.ndarray, headroom: float = 0.95) -> np.ndarray:
+    """Scale a real-valued array to fill the int16 range."""
+    peak = float(np.max(np.abs(samples)))
+    if peak == 0.0:
+        return np.zeros_like(samples, dtype=np.int16)
+    scale = headroom * 32767.0 / peak
+    return np.clip(samples * scale, -32768, 32767).astype(np.int16)
+
+
+def write_wav(path: Path, samples_int16: np.ndarray, sample_rate: int,
+              n_channels: int) -> None:
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(n_channels)
+        wf.setsampwidth(2)  # 16-bit PCM
+        wf.setframerate(int(sample_rate))
+        wf.writeframes(samples_int16.tobytes())
+
+
+def write_iq_wav(iq: np.ndarray, sample_rate: float, path: Path,
+                 target_rate: int = 48000) -> None:
+    """Decimate IQ to target_rate and write as stereo 16-bit WAV (I=L, Q=R)."""
+    factor = max(1, int(round(sample_rate / target_rate)))
+    actual_rate = int(round(sample_rate / factor))
+    iq_dec = lowpass_decimate(iq, factor)
+
+    # Joint scaling so I and Q stay in correct relative amplitude
+    peak = float(max(np.max(np.abs(iq_dec.real)), np.max(np.abs(iq_dec.imag))))
+    scale = 0.95 * 32767.0 / peak if peak > 0 else 1.0
+
+    interleaved = np.empty(2 * len(iq_dec), dtype=np.int16)
+    interleaved[0::2] = np.clip(iq_dec.real * scale, -32768, 32767).astype(np.int16)
+    interleaved[1::2] = np.clip(iq_dec.imag * scale, -32768, 32767).astype(np.int16)
+
+    write_wav(path, interleaved, actual_rate, n_channels=2)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    logging.info("Wrote %s  (stereo IQ, %.1f kHz, %.1f MB)",
+                 path, actual_rate / 1000, size_mb)
+
+
+def demod_fm(iq: np.ndarray) -> np.ndarray:
+    """Quadrature FM demodulation. Returns instantaneous frequency in radians/sample."""
+    # Phase difference between consecutive samples; equivalent to angle of
+    # iq[1:] * conj(iq[:-1]) but avoids the intermediate complex array.
+    return np.angle(iq[1:] * np.conj(iq[:-1])).astype(np.float32)
+
+
+def demod_am(iq: np.ndarray) -> np.ndarray:
+    """Envelope (AM) demodulation. Returns DC-removed magnitude."""
+    env = np.abs(iq).astype(np.float32)
+    return env - np.mean(env)
+
+
+def write_audio_wav(iq: np.ndarray, sample_rate: float, path: Path,
+                    mode: str, target_rate: int = 48000) -> None:
+    """Demodulate and write mono audio at ~target_rate."""
+    if mode == "fm":
+        audio = demod_fm(iq)
+    elif mode == "am":
+        audio = demod_am(iq)
+    else:
+        raise ValueError(f"Unknown demod mode: {mode}")
+
+    factor = max(1, int(round(sample_rate / target_rate)))
+    actual_rate = int(round(sample_rate / factor))
+    audio_dec = lowpass_decimate(audio, factor)
+
+    write_wav(path, _to_int16(audio_dec), actual_rate, n_channels=1)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    logging.info("Wrote %s  (%s demod, mono, %.1f kHz, %.1f MB)",
+                 path, mode.upper(), actual_rate / 1000, size_mb)
+
+
+def compute_features(iq: np.ndarray, sample_rate: float,
+                     center_freq: float, nfft: int = 4096) -> dict:
+    """Extract human-meaningful signal characteristics from IQ data."""
+    # ---- Amplitude domain ----
+    env = np.abs(iq)
+    env_mean = float(np.mean(env))
+    env_std = float(np.std(env))
+    rms = float(np.sqrt(np.mean(env * env)))
+    peak = float(np.max(env))
+    crest_db = 20.0 * np.log10(peak / rms) if rms > 0 else 0.0
+
+    # Burstiness: how much does the envelope vary across short windows?
+    win = max(1, len(env) // 64)
+    if win > 1:
+        chunks = env[:len(env) // win * win].reshape(-1, win)
+        chunk_means = chunks.mean(axis=1)
+        burstiness = float(np.std(chunk_means) / (np.mean(chunk_means) + 1e-12))
+    else:
+        burstiness = 0.0
+
+    # ---- Frequency domain (averaged PSD) ----
+    nfft = min(nfft, len(iq))
+    hop = nfft // 2
+    n_frames = max(1, (len(iq) - nfft) // hop + 1)
+    window = np.hanning(nfft).astype(np.float32)
+    psd = np.zeros(nfft, dtype=np.float64)
+    for i in range(n_frames):
+        s = i * hop
+        frame = iq[s:s + nfft] * window
+        psd += np.abs(np.fft.fftshift(np.fft.fft(frame))) ** 2
+    psd /= n_frames
+    psd_db = 10.0 * np.log10(psd + 1e-20)
+    freqs_hz = np.linspace(-sample_rate / 2, sample_rate / 2, nfft)
+
+    noise_floor_db = float(np.percentile(psd_db, 10))
+    peak_db = float(np.max(psd_db))
+    peak_to_noise_db = peak_db - noise_floor_db
+
+    # Occupied bandwidth: freq range containing X% of the total power
+    psd_norm = psd / (np.sum(psd) + 1e-20)
+    cdf = np.cumsum(psd_norm)
+    def occupied_bw(fraction):
+        lo = float(freqs_hz[np.searchsorted(cdf, (1 - fraction) / 2)])
+        hi = float(freqs_hz[min(len(cdf) - 1,
+                                 np.searchsorted(cdf, 1 - (1 - fraction) / 2))])
+        return hi - lo
+    bw_99 = occupied_bw(0.99)
+    bw_90 = occupied_bw(0.90)
+
+    # Spectral entropy normalized to [0, 1]; 1 = uniform / noise-like
+    spec_entropy = float(-np.sum(psd_norm * np.log2(psd_norm + 1e-20)) / np.log2(nfft))
+
+    # Top peaks (offset from center, in kHz)
+    smoothed = np.convolve(psd_db, np.ones(7) / 7.0, mode="same")
+    n_peaks = 5
+    peak_indices = []
+    work = smoothed.copy()
+    min_separation = nfft // 64
+    for _ in range(n_peaks):
+        idx = int(np.argmax(work))
+        if work[idx] < noise_floor_db + 6:
+            break
+        peak_indices.append(idx)
+        lo = max(0, idx - min_separation)
+        hi = min(nfft, idx + min_separation)
+        work[lo:hi] = -np.inf
+    dominant_peaks_khz = [round(float(freqs_hz[i]) / 1000.0, 3)
+                          for i in peak_indices]
+
+    # ---- Instantaneous frequency stats (FM-bandwidth proxy) ----
+    inst_freq_hz = np.diff(np.unwrap(np.angle(iq))) * sample_rate / (2 * np.pi)
+    inst_freq_mean_khz = float(np.mean(inst_freq_hz)) / 1000.0
+    inst_freq_std_khz = float(np.std(inst_freq_hz)) / 1000.0
+
+    # ---- Plain-English summary string ----
+    if peak_to_noise_db > 25:
+        strength = "strong"
+    elif peak_to_noise_db > 12:
+        strength = "moderate"
+    elif peak_to_noise_db > 6:
+        strength = "faint"
+    else:
+        strength = "no clear"
+
+    if bw_99 < 25e3:
+        bw_word = "narrowband"
+    elif bw_99 < 250e3:
+        bw_word = "medium-bandwidth"
+    else:
+        bw_word = "wideband"
+
+    envelope_word = "bursty" if burstiness > 0.4 else "continuous"
+    n_carriers = len(dominant_peaks_khz)
+    carriers_word = (
+        f"{n_carriers} dominant carrier{'s' if n_carriers != 1 else ''}"
+        if n_carriers > 0 else "no clear carriers"
+    )
+
+    summary = (
+        f"{strength} {bw_word} signal at {center_freq/1e6:.3f} MHz with "
+        f"{envelope_word} envelope and {carriers_word}"
+    )
+
+    return {
+        "center_freq_mhz": round(center_freq / 1e6, 6),
+        "sample_rate_msps": round(sample_rate / 1e6, 6),
+        "duration_s": round(len(iq) / sample_rate, 4),
+        "amplitude": {
+            "mean": env_mean,
+            "std": env_std,
+            "rms": rms,
+            "peak": peak,
+            "crest_factor_db": round(crest_db, 2),
+            "envelope_burstiness": round(burstiness, 4),
+        },
+        "spectrum": {
+            "noise_floor_db": round(noise_floor_db, 2),
+            "peak_db": round(peak_db, 2),
+            "peak_to_noise_db": round(peak_to_noise_db, 2),
+            "occupied_bandwidth_99pct_khz": round(bw_99 / 1000.0, 2),
+            "occupied_bandwidth_90pct_khz": round(bw_90 / 1000.0, 2),
+            "spectral_entropy_normalized": round(spec_entropy, 4),
+            "dominant_peaks_offset_khz": dominant_peaks_khz,
+        },
+        "phase": {
+            "instantaneous_freq_mean_khz": round(inst_freq_mean_khz, 3),
+            "instantaneous_freq_std_khz": round(inst_freq_std_khz, 3),
+        },
+        "summary": summary,
+    }
+
+
+def write_features_json(features: dict, path: Path) -> None:
+    path.write_text(json.dumps(features, indent=2))
+    logging.info("Wrote %s", path)
+    logging.info("  Summary: %s", features["summary"])
+
+
 def write_csv(iq: np.ndarray, sample_rate: float, path: Path,
               decimate: int = 1) -> None:
     if decimate < 1:
@@ -515,7 +803,7 @@ def write_csv(iq: np.ndarray, sample_rate: float, path: Path,
 
 
 def write_metadata(args, center_freq, sample_rate, filters_applied,
-                   output_path, folder) -> None:
+                   output_path, folder, exports) -> None:
     meta = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "mode": args.mode,
@@ -532,7 +820,7 @@ def write_metadata(args, center_freq, sample_rate, filters_applied,
         "filter_seed": args.filter_seed,
         "freq_seed": args.seed,
         "image_file": output_path.name,
-        "csv_written": bool(args.csv),
+        "exports": exports,
     }
     (folder / "metadata.json").write_text(json.dumps(meta, indent=2))
 
@@ -584,8 +872,34 @@ def main() -> None:
         if sdr is not None:
             sdr.close()
 
+    # Resolve --export-all shortcut into individual flags
+    if args.export_all:
+        args.csv = True
+        args.wav = True
+        args.features = True
+        if args.demod == "none":
+            args.demod = "fm"
+
+    exports = {"csv": False, "iq_wav": False, "audio_wav": False, "features": False}
+
     if args.csv:
         write_csv(iq, actual_rate, folder / "iq.csv", decimate=args.csv_decimate)
+        exports["csv"] = "iq.csv"
+
+    if args.wav:
+        write_iq_wav(iq, actual_rate, folder / "iq.wav", target_rate=args.wav_rate)
+        exports["iq_wav"] = "iq.wav"
+
+    if args.demod != "none":
+        audio_path = folder / f"audio_demod_{args.demod}.wav"
+        write_audio_wav(iq, actual_rate, audio_path, args.demod,
+                        target_rate=args.wav_rate)
+        exports["audio_wav"] = audio_path.name
+
+    if args.features:
+        feats = compute_features(iq, actual_rate, actual_freq, nfft=args.nfft)
+        write_features_json(feats, folder / "features.json")
+        exports["features"] = "features.json"
 
     logging.info("Generating %s image...", args.mode)
     if args.mode == "spectrogram":
@@ -611,7 +925,7 @@ def main() -> None:
     Image.fromarray(img).save(output_path, "PNG")
 
     write_metadata(args, actual_freq, actual_rate, filter_names,
-                   output_path, folder)
+                   output_path, folder, exports)
 
     logging.info("Saved %s", output_path)
 
